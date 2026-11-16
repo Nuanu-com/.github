@@ -10,9 +10,9 @@ on:
         type: string
         default: claude-sonnet-5-5
       human_reviewers:
-        description: Comma-separated GitHub users auto-requested as reviewers on every PR
+        description: Comma-separated GitHub users auto-requested as reviewers on every PR (empty = none)
         type: string
-        default: rizgust
+        default: ""
       extra_review_instructions:
         description: Repo-specific review guidance appended to the prompt
         type: string
