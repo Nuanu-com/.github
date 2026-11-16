@@ -1,0 +1,109 @@
+# Reusable Claude workflow for all Nuanu-com repositories.
+# Called from each repo's .github/workflows/claude.yml — edit HERE to change behaviour org-wide.
+name: Claude (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      review_model:
+        description: Model used for automatic PR reviews
+        type: string
+        default: claude-sonnet-5-5
+      human_reviewers:
+        description: Comma-separated GitHub users auto-requested as reviewers on every PR
+        type: string
+        default: rizgust
+      extra_review_instructions:
+        description: Repo-specific review guidance appended to the prompt
+        type: string
+        default: ""
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  # Request a human review on every new / ready-for-review PR (PR author is skipped).
+  request-reviewers:
+    if: >
+      github.event_name == 'pull_request' &&
+      inputs.human_reviewers != '' &&
+      contains(fromJSON('["opened","reopened","ready_for_review"]'), github.event.action)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Request reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          REVIEWERS: ${{ inputs.human_reviewers }}
+        run: |
+          list=$(echo "$REVIEWERS" | tr ',' '\n' | sed 's/ //g' | grep -v -i -x "$AUTHOR" | grep . | paste -sd, - || true)
+          if [ -z "$list" ]; then echo "Only reviewer is the PR author; skipping."; exit 0; fi
+          gh pr edit "$PR" --repo "$REPO" --add-reviewer "$list"
+
+  # Automatic review on every non-draft PR from this repository (not forks).
+  review:
+    if: >
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. Focus on, in order of priority:
+            1. Bugs and logic errors
+            2. Security issues (injection, auth/authz gaps, secrets in code, unsafe input handling)
+            3. Performance problems
+            4. Error handling and edge cases
+            5. Maintainability and consistency with the existing codebase
+
+            Rules:
+            - Read the full diff with `gh pr diff` and look at surrounding code where needed.
+            - Use inline comments (mcp__github_inline_comment__create_inline_comment) for
+              specific, actionable issues on changed lines. Suggest fixes when you can.
+            - Do not nitpick formatting or style that a linter would catch.
+            - If a CLAUDE.md exists in the repo, follow its conventions.
+            - Finish with one concise summary comment via `gh pr comment`.
+              If you found nothing significant, say so briefly.
+
+            ${{ inputs.extra_review_instructions }}
+          claude_args: |
+            --model ${{ inputs.review_model }}
+            --max-turns 30
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+
+  # Interactive: responds when someone mentions @claude in a PR/issue comment or review.
+  interactive:
+    if: >
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
